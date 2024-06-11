@@ -6,22 +6,28 @@ import uuid
 from asyncio import sleep, Semaphore
 from datetime import datetime, timedelta
 from random import randint
-
+import unicodedata
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.context import FSMContext
-from aiogram.filters.state import State, StatesGroup
-from aiogram.exceptions import TelegramAPIError, TelegramNetworkError
+from aiogram.utils import executor
+from aiogram.contrib.middlewares.logging import LoggingMiddleware
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.utils.exceptions import NetworkError, TelegramAPIError
 from aiohttp import ClientConnectorError
+from telethon import TelegramClient, events
+from telethon.tl.types import PeerChannel, MessageMediaWebPage, MessageEntityTextUrl, MessageEntityBold, \
+    MessageEntityItalic
 
-from telethon import TelegramClient
-from telethon.tl.types import PeerChannel, MessageMediaWebPage, MessageEntityTextUrl
 from config import API_HASH, API_ID, BOT_TOKEN
+
+
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+dp = Dispatcher(bot, storage=storage)
+dp.middleware.setup(LoggingMiddleware())
 client = TelegramClient('bot', API_ID, API_HASH)
 
 tasks = {}
@@ -37,29 +43,17 @@ class Form(StatesGroup):
     confirm_delete = State()
     get_timings = State()
 
-main_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [
-        KeyboardButton(text='Мои задачи'),
-        KeyboardButton(text='Добавить канал'),
-        KeyboardButton(text='Новая задача'),
-        KeyboardButton(text='Удалить задачу'),
-        KeyboardButton(text='Тайм-коды'),
-        KeyboardButton(text='Остановка'),
-        ],  
-        ],
-resize_keyboard=True)
 
+main_menu = ReplyKeyboardMarkup(resize_keyboard=True)
+main_menu.add(KeyboardButton('Мои задачи'))
+main_menu.add(KeyboardButton('Добавить канал'))
+main_menu.add(KeyboardButton('Новая задача'))
+main_menu.add(KeyboardButton('Удалить задачу'))
+main_menu.add(KeyboardButton('Тайм-коды'))
+main_menu.add(KeyboardButton('Остановка'))
 
-# Создание стартовой клавиатуры
-start_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [
-        KeyboardButton(text='Запуск')
-        ],
-    ],
-    resize_keyboard=True)
-
+start_menu = ReplyKeyboardMarkup(resize_keyboard=True)
+start_menu.add(KeyboardButton('Запуск'))
 
 MAX_CONCURRENT_REQUESTS = 5
 semaphore = Semaphore(MAX_CONCURRENT_REQUESTS)
@@ -67,7 +61,7 @@ semaphore = Semaphore(MAX_CONCURRENT_REQUESTS)
 
 
 
-@dp.message(commands=['start'])
+@dp.message_handler(commands=['start'])
 async def start(message: types.Message):
     global bot_running
     bot_running = True
@@ -76,11 +70,11 @@ async def start(message: types.Message):
             await message.answer("Привет! Я бот для автоматического постинга. Выберите действие:",
                                  reply_markup=main_menu)
             break
-        except (TelegramNetworkError, TelegramAPIError) as e:
+        except (NetworkError, TelegramAPIError) as e:
             print(f"Network error occurred: {e}")
             await sleep(5)  # Повторить попытку через 5 секунд
 
-@dp.message(lambda message: message.text == 'Остановка')
+@dp.message_handler(lambda message: message.text == 'Остановка')
 async def stop_bot(message: types.Message, state: FSMContext):
     global bot_running
     bot_running = False
@@ -92,11 +86,11 @@ async def stop_bot(message: types.Message, state: FSMContext):
             await message.answer("Бот остановлен. Выберите 'Запуск' для возобновления работы.",
                                  reply_markup=start_menu)
             break
-        except (TelegramNetworkError, TelegramAPIError) as e:
+        except (NetworkError, TelegramAPIError) as e:
             print(f"Network error occurred: {e}")
             await sleep(5)  # Повторить попытку через 5 секунд
 
-@dp.message(lambda message: message.text == 'Запуск')
+@dp.message_handler(lambda message: message.text == 'Запуск')
 async def start_bot(message: types.Message):
     global bot_running
     bot_running = True
@@ -104,11 +98,11 @@ async def start_bot(message: types.Message):
         try:
             await message.answer("Бот запущен. Выберите действие:", reply_markup=main_menu)
             break
-        except (TelegramNetworkError, TelegramAPIError) as e:
+        except (NetworkError, TelegramAPIError) as e:
             print(f"Network error occurred: {e}")
             await sleep(5)  # Повторить попытку через 5 секунд
 
-@dp.message(lambda message: message.text == 'Мои задачи' and bot_running)
+@dp.message_handler(lambda message: message.text == 'Мои задачи' and bot_running)
 async def show_tasks(message: types.Message):
     if tasks:
         response = "Ваши задачи:\n"
@@ -119,7 +113,7 @@ async def show_tasks(message: types.Message):
         await message.answer("У вас нет активных задач.")
 
 
-@dp.message(lambda message: message.text == 'Добавить канал' and bot_running)
+@dp.message_handler(lambda message: message.text == 'Добавить канал' and bot_running)
 async def add_channel(message: types.Message):
     await Form.get_channel_id.set()
     back_menu = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -127,7 +121,7 @@ async def add_channel(message: types.Message):
     await message.answer("Введите ID канала или нажмите 'Назад' для возврата:", reply_markup=back_menu)
 
 
-@dp.message(state=Form.get_channel_id)
+@dp.message_handler(state=Form.get_channel_id)
 async def get_channel_id(message: types.Message, state: FSMContext):
     if message.text == 'Назад':
         await state.finish()
@@ -145,7 +139,7 @@ async def get_channel_id(message: types.Message, state: FSMContext):
     await message.answer("Теперь введите название канала или нажмите 'Назад' для возврата:")
 
 
-@dp.message(state=Form.get_channel_name)
+@dp.message_handler(state=Form.get_channel_name)
 async def get_channel_name(message: types.Message, state: FSMContext):
     if message.text == 'Назад':
         await Form.get_channel_id.set()
@@ -168,7 +162,7 @@ async def get_channel_name(message: types.Message, state: FSMContext):
     await state.finish()
     await message.answer(f"Канал добавлен: {channel_name} (ID: {channel_id}). Выберите действие:", reply_markup=main_menu)
 
-@dp.message(lambda message: message.text == 'Новая задача' and bot_running)
+@dp.message_handler(lambda message: message.text == 'Новая задача' and bot_running)
 async def new_task(message: types.Message):
     if message.chat.id not in channels or not channels[message.chat.id]:
         await message.answer("У вас нет добавленных каналов. Пожалуйста, добавьте канал, прежде чем создавать задачу.")
@@ -206,7 +200,7 @@ async def choose_channel(callback_query: types.CallbackQuery, state: FSMContext)
     await bot.send_message(callback_query.from_user.id, "Теперь введите ссылки на посты через точку с запятой (например, t.me/big_idea/769; t.me/big_idea/765):")
     await callback_query.answer()
 
-@dp.message(state=Form.get_posts)
+@dp.message_handler(state=Form.get_posts)
 async def get_posts(message: types.Message, state: FSMContext):
     if message.text == 'Назад':
         await Form.choose_channel.set()
@@ -234,7 +228,7 @@ async def get_posts(message: types.Message, state: FSMContext):
     asyncio.create_task(schedule_posts(task_id))
 
 
-@dp.message(lambda message: message.text == 'Тайм-коды' and bot_running)
+@dp.message_handler(lambda message: message.text == 'Тайм-коды' and bot_running)
 async def manage_timings(message: types.Message):
     if message.chat.id in timings and timings[message.chat.id]:
         current_timings = ', '.join(timings[message.chat.id])
@@ -248,7 +242,7 @@ async def manage_timings(message: types.Message):
     await Form.get_timings.set()
 
 
-@dp.message(state=Form.get_timings)
+@dp.message_handler(state=Form.get_timings)
 async def set_timings(message: types.Message, state: FSMContext):
     if message.text == 'Назад':
         await state.finish()
@@ -287,7 +281,7 @@ async def set_timings(message: types.Message, state: FSMContext):
     await message.answer(f"Новые тайм-коды установлены: {', '.join(new_timings)}.", reply_markup=main_menu)
 
 
-@dp.message(lambda message: message.text == 'Удалить задачу' and bot_running)
+@dp.message_handler(lambda message: message.text == 'Удалить задачу' and bot_running)
 async def delete_task(message: types.Message):
     if tasks:
         response = "Выберите ID задачи для удаления:\n"
@@ -299,7 +293,7 @@ async def delete_task(message: types.Message):
         await message.answer("У вас нет активных задач.")
 
 
-@dp.message(state=Form.confirm_delete)
+@dp.message_handler(state=Form.confirm_delete)
 async def confirm_delete_task(message: types.Message, state: FSMContext):
     if not bot_running or message.text == 'Остановка':
         await state.finish()
@@ -421,7 +415,7 @@ async def schedule_posts(task_id):
                     else:
                         logging.error(f"OS error occurred: {e}")
                         retry_count += 1
-                except (TelegramNetworkError, ClientConnectorError, TelegramAPIError, ConnectionError) as e:
+                except (NetworkError, ClientConnectorError, TelegramAPIError, ConnectionError) as e:
                     logging.error(f"Network error occurred: {e}")
                     retry_count += 1
                 finally:
@@ -443,7 +437,7 @@ async def main():
         try:
             await client.start(bot_token=BOT_TOKEN)
             break
-        except (TelegramNetworkError, ClientConnectorError, TelegramAPIError, ConnectionError, asyncio.TimeoutError) as e:
+        except (NetworkError, ClientConnectorError, TelegramAPIError, ConnectionError, asyncio.TimeoutError) as e:
             logging.error(f"Network error occurred during client start: {e}")
             await sleep(5)  # Повторить попытку через 5 секунд
 
@@ -451,4 +445,4 @@ async def main():
 if __name__ == '__main__':
     loop = asyncio.get_event_loop()
     loop.create_task(main())
-    dp.start_polling(bot, skip_updates=True)
+    executor.start_polling(dp, skip_updates=True)
