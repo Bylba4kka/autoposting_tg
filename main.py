@@ -12,7 +12,7 @@ from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.utils.exceptions import TelegramAPIError
 from telethon import TelegramClient, events
-from telethon.tl.types import MessageMediaWebPage, MessageMediaPhoto, MessageMediaDocument
+from telethon.tl.types import MessageMediaWebPage, PeerChannel, MessageMediaPhoto, MessageMediaDocument, InputMessagesFilterPhotos
 
 
 
@@ -26,6 +26,8 @@ storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 dp.middleware.setup(LoggingMiddleware())
 
+# Множество для отслеживания обработанных grouped_id
+processed_grouped_ids = set()
 tasks = load_data_json()
 channels = {}
 bot_running = True
@@ -33,11 +35,21 @@ max_retries = 5
 IGNORE_ERRNO = {10038, 121}
 semaphore = asyncio.Semaphore(10)  # Ограничение одновременных запросов
 
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+main_logger = logging.FileHandler('main.log')
+main_logger.setLevel(logging.INFO)
+
+logger = logging.getLogger()
+logger.addHandler(main_logger)
+
+
 try:
     client = TelegramClient("session", API_ID, API_HASH)
     client.start()
 except Exception as ap:
-    print(f"ERROR - {ap}")
+    logger.info(f"ERROR - {ap}")
     exit(1)
 
 
@@ -206,21 +218,40 @@ async def get_target_channel_name(message: types.Message, state: FSMContext):
     asyncio.create_task(monitor_channel(task_id))
 
 
+
+
+async def fetch_media_group(client: TelegramClient, source_channel, grouped_id):
+    messages = []
+    async for message in client.iter_messages(source_channel, limit=11):
+        if message.grouped_id == grouped_id:
+            messages.append(message)
+    messages.sort(key=lambda x: x.id) 
+    return messages
+
+
+
 async def monitor_channel(task_id):
     task = tasks[task_id]
     source_channel = int(task['source_channel'])
     target_channel = int(task['target_channel'])
-    target_channel = await client.get_entity(target_channel)
+    target_channel = await client.get_entity(PeerChannel(target_channel))
 
 
     async def forward_message(event):
-        
         if task_id not in tasks:
             return
         
         post = event.message
         message_id = post.id
         channel_username = source_channel
+        
+        grouped_id = post.grouped_id
+
+        if grouped_id and grouped_id in processed_grouped_ids:
+            return
+        else:
+            processed_grouped_ids.add(grouped_id)
+
 
         retry_count = 0
         while retry_count < max_retries:
@@ -229,7 +260,7 @@ async def monitor_channel(task_id):
                     channel = await asyncio.wait_for(client.get_entity(channel_username), timeout=20)
                     message_to_forward = await asyncio.wait_for(client.get_messages(channel, ids=message_id), timeout=20)
 
-                    logging.info(f"Forwarding message with id {message_id} from {channel_username}")
+                    logger.info(f"Forwarding message with id {message_id} from {channel_username}")
 
                     message_text = message_to_forward.message
                     entities = message_to_forward.entities
@@ -242,10 +273,9 @@ async def monitor_channel(task_id):
                 media_messages = []
 
                 if media:
-                    
                     if isinstance(media, MessageMediaWebPage):
                         # Если медиагруппа - отправляем сообщение с включенным превью ссылки
-                        await asyncio.wait_for(client.send_message(
+                        await asyncio.wait_for(client.send_file(
                             target_channel,
                             message_text,
                             parse_mode='html',
@@ -253,18 +283,28 @@ async def monitor_channel(task_id):
                         ), timeout=20)
                     elif isinstance(media, MessageMediaPhoto):
                         # Если одно изображение - добавляем его в список медиамесседжей
-                        media_messages.append(media)
-                    elif isinstance(media, MessageMediaDocument) and media.document.mime_type.startswith('image/'):
+                        
+                        
+                        if grouped_id:
+                            # Получить все сообщения с тем же grouped_id
+                            media_messages = await fetch_media_group(client, source_channel, grouped_id)
+                    
+                        else:
+                            media_messages.append(media)
+                    elif isinstance(media, MessageMediaDocument):
                         # Если это документ с изображением - добавляем его в список медиамесседжей
                         media_messages.append(media)
-
                     if media_messages:
                         # Если есть медиамесседжи - отправляем медиагруппу
                         await asyncio.wait_for(client.send_file(
                             target_channel,
-                            media_messages
+                            file=media_messages,
+                            caption=message_text,
+                            parse_mode="markdown"
                         ), timeout=20)
+
                 else:
+
                     # Если нет медиа - отправляем текстовое сообщение
                     await asyncio.wait_for(client.send_message(
                         target_channel,
@@ -274,24 +314,24 @@ async def monitor_channel(task_id):
 
                 break
             except asyncio.TimeoutError:
-                logging.error("Operation timed out")
+                logger.info("Operation timed out")
                 retry_count += 1
             except OSError as e:
                 if e.errno in IGNORE_ERRNO:
-                    logging.warning(f"Ignoring OS error: {e}")
+                    logger.info(f"Ignoring OS error: {e}")
                     break
                 else:
-                    logging.error(f"OS error occurred: {e}")
+                    logger.info(f"OS error occurred: {e}")
                     retry_count += 1
             except (TelegramAPIError, ConnectionError) as e:
-                logging.error(f"Network error occurred: {e}")
+                logger.info(f"Network error occurred: {e}")
                 retry_count += 1
             finally:
                 if retry_count >= max_retries:
-                    logging.error("Max retries reached. Restarting client...")
+                    logger.info("Max retries reached. Restarting client...")
 
             sleep_time = min(2 ** retry_count + randint(0, 1000) / 1000, 60)
-            logging.info(f"Retrying in {sleep_time} seconds...")
+            logger.info(f"Retrying in {sleep_time} seconds...")
             await asyncio.sleep(sleep_time)
 
     client.add_event_handler(forward_message, events.NewMessage(chats=source_channel, incoming=True))

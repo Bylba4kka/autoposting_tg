@@ -1,1 +1,14 @@
-{}
+{
+    "843CD542": {
+        "source_channel": "-1002246656034",
+        "source_channel_name": "Все айти",
+        "target_channel": "-1002149477531",
+        "target_channel_name": "Парсер100"
+    },
+    "CCEDE590": {
+        "source_channel": "-1002197571795",
+        "source_channel_name": "bylba4kapost",
+        "target_channel": "-1002063067727",
+        "target_channel_name": "mailing_test"
+    }
+}

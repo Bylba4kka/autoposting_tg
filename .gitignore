@@ -1,4 +1,6 @@
 *.session
+*.session-journal
+main.log
 venv
 __pycache__
 config.py
